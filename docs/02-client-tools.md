@@ -100,6 +100,14 @@ chmod +x kubectl
 sudo mv kubectl /usr/local/bin/
 ```
 
+The following steps will enable shell tab completion on kubectl while using bash:
+
+```
+echo "source <(kubectl completion bash)" >> ~/.bashrc && bash
+```
+>You can also omit the "&& bash" and reload the shell later. 
+>This will only enable tab completion for your current user.
+
 ### Verification
 
 Verify `kubectl` version 1.10.2 or higher is installed:
