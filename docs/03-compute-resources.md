@@ -1,8 +1,8 @@
 # Provisioning Compute Resources
 
-Kubernetes requires a set of machines to host the Kubernetes control plane and the worker nodes where containers are ultimately run. In this lab you will provision the compute resources required for running a secure and highly available Kubernetes cluster across a single [compute zone](https://cloud.google.com/compute/docs/regions-zones/regions-zones).
+Kubernetes requires a set of machines to host the Kubernetes control plane and the worker nodes where containers are ultimately run. In this lab you will provision the compute resources required for running a secure and highly available Kubernetes cluster across a single [region](https://azure.microsoft.com/en-us/global-infrastructure/regions/).
 
-> Ensure a default compute zone and region have been set as described in the [Prerequisites](01-prerequisites.md#set-a-default-compute-region-and-zone) lab.
+> Ensure a default resource group and region have been set as described in the [Prerequisites](01-prerequisites.md#set-a-default-compute-region-and-zone) lab.
 
 ## Networking
 
@@ -10,62 +10,71 @@ The Kubernetes [networking model](https://kubernetes.io/docs/concepts/cluster-ad
 
 > Setting up network policies is out of scope for this tutorial.
 
-### Virtual Private Cloud Network
+### Virtual Network
 
-In this section a dedicated [Virtual Private Cloud](https://cloud.google.com/compute/docs/networks-and-firewalls#networks) (VPC) network will be setup to host the Kubernetes cluster.
+In this section a dedicated [Virtual Network](https://docs.microsoft.com/en-us/azure/virtual-network/virtual-networks-overview) VNET network will be setup to host the Kubernetes cluster.
 
-Create the `kubernetes-the-hard-way` custom VPC network:
-
-```
-gcloud compute networks create kubernetes-the-hard-way --subnet-mode custom
-```
-
-A [subnet](https://cloud.google.com/compute/docs/vpc/#vpc_networks_and_subnets) must be provisioned with an IP address range large enough to assign a private IP address to each node in the Kubernetes cluster.
-
-Create the `kubernetes` subnet in the `kubernetes-the-hard-way` VPC network:
+Create the `kubernetes-hard-vnet` Virtual Network:
 
 ```
-gcloud compute networks subnets create kubernetes \
-  --network kubernetes-the-hard-way \
-  --range 10.240.0.0/24
+az network vnet create \
+	--name kube-hard-vnet \
+	--address-prefix 10.0.0.0/8
 ```
 
-> The `10.240.0.0/24` IP address range can host up to 254 compute instances.
+A subnet must be provisioned with an IP address range large enough to assign a private IP address to each node in the Kubernetes cluster.
 
-### Firewall Rules
-
-Create a firewall rule that allows internal communication across all protocols:
+Create the `kube-nodes-sub` subnet in the `kube-hard-vnet` network:
 
 ```
-gcloud compute firewall-rules create kubernetes-the-hard-way-allow-internal \
-  --allow tcp,udp,icmp \
-  --network kubernetes-the-hard-way \
-  --source-ranges 10.240.0.0/24,10.200.0.0/16
+az network vnet subnet create \
+	--vnet-name kubernetes-hard-vnet \
+	-n kube-nodes-sub \
+	--address-prefix 10.240.0.0/24
 ```
 
-Create a firewall rule that allows external SSH, ICMP, and HTTPS:
+> The `10.240.0.0/24` IP address range can host up to 251 virtual machines.
+
+### Firewall Rules/ Network Security Groups
+
+[Network Security Groups](https://docs.microsoft.com/en-us/azure/virtual-network/security-overview) in Azure serve as a virtual firewalls for controlling inbound and outbound traffic.
+
+Create an NSG for our recently created VNET:
 
 ```
-gcloud compute firewall-rules create kubernetes-the-hard-way-allow-external \
-  --allow tcp:22,tcp:6443,icmp \
-  --network kubernetes-the-hard-way \
-  --source-ranges 0.0.0.0/0
+az network nsg create \
+	-n kube-hard-nsg
 ```
 
-> An [external load balancer](https://cloud.google.com/compute/docs/load-balancing/network/) will be used to expose the Kubernetes API Servers to remote clients.
-
-List the firewall rules in the `kubernetes-the-hard-way` VPC network:
+Let's attach now our NSG to the `kube-nodes-sub` subnet:
 
 ```
-gcloud compute firewall-rules list --filter="network:kubernetes-the-hard-way"
+az network vnet subnet update \
+	--name kube-nodes-sub \
+	--vnet-name kubernetes-hard-vnet \
+	--network-security-group kube-hard-nsg
 ```
-
-> output
+Update NSG rules to allow external SSH, and HTTPS:
 
 ```
-NAME                                    NETWORK                  DIRECTION  PRIORITY  ALLOW                 DENY
-kubernetes-the-hard-way-allow-external  kubernetes-the-hard-way  INGRESS    1000      tcp:22,tcp:6443,icmp
-kubernetes-the-hard-way-allow-internal  kubernetes-the-hard-way  INGRESS    1000      tcp,udp,icmp
+az network nsg rule create \
+	--nsg-name Kube-Hard-NSG \
+	-n allow_ssh_https \
+	--priority 100 \
+	--source-address-prefixes '*' \
+	--source-port-ranges '*' \
+	--destination-address-prefixes '*' \
+	--destination-port-ranges 22 6443 \
+	--access Allow \
+	--protocol Tcp \
+	--description "Allow SSH and HTTPS from any Source."
+```
+>You can modify the `--source-address-prefixes` with your own IP address to increase security of your cluster.
+
+List the NSG configuration, making sure that the subnet and the newly created rules show up:
+
+```
+az network nsg show -n kube-hard-nsg
 ```
 
 ### Kubernetes Public IP Address
@@ -73,44 +82,47 @@ kubernetes-the-hard-way-allow-internal  kubernetes-the-hard-way  INGRESS    1000
 Allocate a static IP address that will be attached to the external load balancer fronting the Kubernetes API Servers:
 
 ```
-gcloud compute addresses create kubernetes-the-hard-way \
-  --region $(gcloud config get-value compute/region)
+az network public-ip create \
+	-n kube-hard-public-api-ip \
+	--allocation-method Static
 ```
 
-Verify the `kubernetes-the-hard-way` static IP address was created in your default compute region:
+Verify the `kube-hard-public-api-ip` static IP address was created in your default region:
 
 ```
-gcloud compute addresses list --filter="name=('kubernetes-the-hard-way')"
+az network public-ip show \
+-n kube-hard-public-api-ip \
+--query "{name: name, resourceGroup: resourceGroup, address: ipAddress, AllocationMethod: publicIpAllocationMethod}" \
+-o table
 ```
 
 > output
 
 ```
-NAME                     REGION    ADDRESS        STATUS
-kubernetes-the-hard-way  us-west1  XX.XXX.XXX.XX  RESERVED
+Name                     ResourceGroup    Address        AllocationMethod
+-----------------------  ---------------  -------------  ------------------
+kube-hard-public-api-ip  KubeHardWay      xx.xx.xx.xx  Static
 ```
 
-## Compute Instances
+## Virtual Machines
 
-The compute instances in this lab will be provisioned using [Ubuntu Server](https://www.ubuntu.com/server) 18.04, which has good support for the [containerd container runtime](https://github.com/containerd/containerd). Each compute instance will be provisioned with a fixed private IP address to simplify the Kubernetes bootstrapping process.
+The virtual machines in this lab will be provisioned using [Ubuntu Server](https://www.ubuntu.com/server) 18.04, which has good support for the [containerd container runtime](https://github.com/containerd/containerd). Each virtual machine will be provisioned with a fixed private IP address to simplify the Kubernetes bootstrapping process.
 
-### Kubernetes Controllers
+>Before creating the virtual machines we will be creating an Availability set that will contain our K8s controllers in order to provide High availability.
 
-Create three compute instances which will host the Kubernetes control plane:
+## Availability Set
+
+Availability sets are a group of virtual machines that are deployed across fault domains and update domains. Availability sets will make sure that our K8s Controllers will not be affected by single points of failure, like the network switch or the power unit of a rack of servers.
+
+###### Continue Here
+
+### Creating the Kubernetes Controllers
+
+Create three virtual machines which will host the Kubernetes control plane:
 
 ```
-for i in 0 1 2; do
-  gcloud compute instances create controller-${i} \
-    --async \
-    --boot-disk-size 200GB \
-    --can-ip-forward \
-    --image-family ubuntu-1804-lts \
-    --image-project ubuntu-os-cloud \
-    --machine-type n1-standard-1 \
-    --private-network-ip 10.240.0.1${i} \
-    --scopes compute-rw,storage-ro,service-management,service-control,logging-write,monitoring \
-    --subnet kubernetes \
-    --tags kubernetes-the-hard-way,controller
+for i in 0 1; do
+  
 done
 ```
 
